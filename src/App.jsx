@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Users, Calendar as CalendarIcon, Settings, CheckCircle, Clock } from 'lucide-react';
+import { Users, Calendar as CalendarIcon, Settings, CheckCircle, Clock, AlertTriangle } from 'lucide-react';
 import { format, getDaysInMonth, startOfMonth, getDay } from 'date-fns';
-// 🔥 updateDoc 추가됨
 import { db } from './firebase';
 import { collection, onSnapshot, addDoc, deleteDoc, doc, updateDoc } from 'firebase/firestore';
 
@@ -11,35 +10,39 @@ export default function App() {
   
   const [students, setStudents] = useState([]);
   const [attendance, setAttendance] = useState([]);
+  const [holidays, setHolidays] = useState([]);
   const [loading, setLoading] = useState(true);
   
   const [selectedStudent, setSelectedStudent] = useState('');
+  const [selectedDateForAbsence, setSelectedDateForAbsence] = useState('');
   const [newStudentName, setNewStudentName] = useState('');
   const [newClassTime, setNewClassTime] = useState('15:00');
 
-  // 1. Firebase Firestore 실시간 학생 목록 로드 및 가나다순 정렬
+  // 1. 학생 목록 로드 (가나다순)
   useEffect(() => {
     const unsubscribe = onSnapshot(collection(db, 'students'), (snapshot) => {
-      const studentList = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
-      // 🔥 기능 3: 학생 이름 가나다(한국어) 순으로 자동 정렬
+      const studentList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       studentList.sort((a, b) => a.name.localeCompare(b.name, 'ko-KR'));
       setStudents(studentList);
     });
     return () => unsubscribe();
   }, []);
 
-  // 2. Firebase Firestore 실시간 출결 기록 로드
+  // 2. 출결 기록 로드
   useEffect(() => {
     const unsubscribe = onSnapshot(collection(db, 'attendance'), (snapshot) => {
-      const attendanceList = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
+      const attendanceList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setAttendance(attendanceList);
       setLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // 3. 전체 휴강 일정 로드
+  useEffect(() => {
+    const unsubscribe = onSnapshot(collection(db, 'holidays'), (snapshot) => {
+      const holidayList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setHolidays(holidayList);
     });
     return () => unsubscribe();
   }, []);
@@ -50,7 +53,6 @@ export default function App() {
     }
   }, [students, selectedStudent]);
 
-  // 지각 계산 함수
   const calculateLateMinutes = (classTime, actualTime) => {
     const [classH, classM] = classTime.split(':').map(Number);
     const [actualH, actualM] = actualTime.split(':').map(Number);
@@ -59,72 +61,137 @@ export default function App() {
     return actualTotal > classTotal ? actualTotal - classTotal : 0;
   };
 
-  // 🔥 기능 1: 출결 탭하기 (토글 방식: 등록 <-> 취소)
+  // 출결 입력 탭 핸들러 (등원 등록/취소)
   const handleTapAttendance = async (student) => {
     const now = new Date();
     const dateStr = format(now, 'yyyy-MM-dd');
     const timeStr = format(now, 'HH:mm');
     
-    // 오늘 이미 출석했는지 확인
-    const alreadyAttended = attendance.find(
-      (a) => a.studentId === student.id && a.date === dateStr
-    );
+    const isTodayHoliday = holidays.some(h => h.date === dateStr);
+    if (isTodayHoliday) {
+      alert('오늘은 공식 휴강일이므로 출결을 등록할 수 없습니다.');
+      return;
+    }
+
+    const alreadyAttended = attendance.find(a => a.studentId === student.id && a.date === dateStr);
 
     if (alreadyAttended) {
-      // 이미 출석한 상태에서 탭하면 -> 출석 취소(기록 삭제) 묻기
       if (window.confirm(`${student.name} 학생의 오늘 출결 기록을 취소(삭제)하시겠습니까?`)) {
         try {
           await deleteDoc(doc(db, 'attendance', alreadyAttended.id));
-        } catch (error) {
-          alert('출결 취소 실패: ' + error.message);
-        }
+        } catch (error) { alert(error.message); }
       }
       return;
     }
 
-    // 출석 기록이 없다면 -> 정상 등록
     const lateMinutes = calculateLateMinutes(student.classTime, timeStr);
     try {
       await addDoc(collection(db, 'attendance'), {
         studentId: student.id,
         date: dateStr,
         time: timeStr,
-        lateMinutes: Number(lateMinutes)
+        lateMinutes: Number(lateMinutes),
+        status: 'present'
       });
-    } catch (error) {
-      alert('출결 등록 실패: ' + error.message);
-    }
+    } catch (error) { alert(error.message); }
   };
 
-  // 🔥 기능 2: 달력에서 시간 눌러서 수정하기
+  // 등원 시간 수정 기능 (달력 탭에서 사용)
   const handleEditTime = async (record) => {
     const newTime = window.prompt('수정할 등원 시각을 입력하세요 (예: 15:30)', record.time);
+    if (newTime === null) return;
     
-    if (newTime === null) return; // 취소 버튼 누름
-    
-    // 시간 입력 형식 검증 (HH:MM)
     const timeRegex = /^([01]?[0-9]|2[0-3]):[0-5][0-9]$/;
     if (!timeRegex.test(newTime)) {
-      alert('시간 형식이 올바르지 않습니다. 반드시 15:30 형태로 입력해 주세요.');
+      alert('시간 형식이 올바르지 않습니다. (예: 15:30)');
       return;
     }
 
-    // 기준 시간을 알아내기 위해 학생 정보 찾기
     const student = students.find(s => s.id === record.studentId);
     if (!student) return;
 
-    // 변경된 시간을 바탕으로 지각 시간 재계산
     const newLateMinutes = calculateLateMinutes(student.classTime, newTime);
-
     try {
-      // 클라우드 데이터베이스 시간 업데이트
       await updateDoc(doc(db, 'attendance', record.id), {
         time: newTime,
-        lateMinutes: Number(newLateMinutes)
+        lateMinutes: Number(newLateMinutes),
+        status: 'present'
       });
-      alert('시간이 성공적으로 수정되었습니다.');
+    } catch (error) { alert(error.message); }
+  };
+
+  // 🔥 추가기능 : 재원생 명단에서 학생 정규 수업시각 수정 기능
+  const handleEditStudentClassTime = async (student) => {
+    const newTime = window.prompt(`${student.name} 학생의 변경할 정규 등원시각을 입력하세요 (예: 16:00)`, student.classTime);
+    if (newTime === null) return; // 취소 누르면 중단
+
+    const timeRegex = /^([01]?[0-9]|2[0-3]):[0-5][0-9]$/;
+    if (!timeRegex.test(newTime)) {
+      alert('시간 형식이 올바르지 않습니다. 반드시 16:00 형태로 입력해 주세요.');
+      return;
+    }
+
+    try {
+      // Firebase 클라우드의 학생 정규 시각 업데이트
+      await updateDoc(doc(db, 'students', student.id), {
+        classTime: newTime
+      });
+      alert(`${student.name} 학생의 기준 시각이 ${newTime}으로 변경되었습니다.`);
     } catch (error) {
-      alert('시간 수정 실패: ' + error.message);
+      alert('기준 시각 수정 실패: ' + error.message);
+    }
+  };
+
+  // 달력 날짜 클릭 시 3단계 사이클 (선택 -> 결석 -> 복구)
+  const handleDayClick = async (dateStr, record) => {
+    if (holidays.some(h => h.date === dateStr)) return;
+
+    if (record && record.status !== 'absent') {
+      handleEditTime(record);
+      return;
+    }
+
+    if (record && record.status === 'absent') {
+      try {
+        await deleteDoc(doc(db, 'attendance', record.id));
+        setSelectedDateForAbsence('');
+      } catch (error) { alert(error.message); }
+    } else if (selectedDateForAbsence === dateStr) {
+      try {
+        await addDoc(collection(db, 'attendance'), {
+          studentId: selectedStudent,
+          date: dateStr,
+          status: 'absent'
+        });
+        setSelectedDateForAbsence('');
+      } catch (error) { alert(error.message); }
+    } else {
+      setSelectedDateForAbsence(dateStr);
+    }
+  };
+
+  // 공통 휴강 등록 기능 (토글 방식)
+  const handleRegisterHoliday = async () => {
+    const currentMonthStr = format(currentDate, 'yyyy년 MM월');
+    const dayInput = window.prompt(`${currentMonthStr}에 적용할 휴강 날짜(일)를 숫자만 입력하세요. (예: 25)\n이미 등록된 날짜를 입력하면 휴강이 취소됩니다.`);
+    if (!dayInput) return;
+
+    const dayNum = parseInt(dayInput, 10);
+    if (isNaN(dayNum) || dayNum < 1 || dayNum > 31) {
+      alert('올바른 날짜를 입력해 주세요.');
+      return;
+    }
+
+    const targetDateStr = format(new Date(currentDate.getFullYear(), currentDate.getMonth(), dayNum), 'yyyy-MM-dd');
+    const existingHoliday = holidays.find(h => h.date === targetDateStr);
+
+    if (existingHoliday) {
+      if (window.confirm(`${dayNum}일의 공통 휴강을 취소하고 정상 수업일로 복구하시겠습니까?`)) {
+        await deleteDoc(doc(db, 'holidays', existingHoliday.id));
+      }
+    } else {
+      await addDoc(collection(db, 'holidays'), { date: targetDateStr });
+      alert(`${dayNum}일이 공통 휴강일로 등록되었습니다.`);
     }
   };
 
@@ -134,26 +201,20 @@ export default function App() {
     try {
       await addDoc(collection(db, 'students'), { name: newStudentName, classTime: newClassTime });
       setNewStudentName('');
-    } catch (error) {
-      alert('학생 등록 실패: ' + error.message);
-    }
+    } catch (error) { alert(error.message); }
   };
 
   const handleDeleteStudent = async (id) => {
-    if (window.confirm('학생 정보와 해당 학생의 모든 출결 기록이 영구 삭제됩니다. 계속하시겠습니까?')) {
+    if (window.confirm('원생 정보와 모든 기록이 삭제됩니다. 계속하시겠습니까?')) {
       try {
         await deleteDoc(doc(db, 'students', id));
-        const relatedRecords = attendance.filter(a => a.studentId === id);
-        for (const record of relatedRecords) {
-          await deleteDoc(doc(db, 'attendance', record.id));
-        }
-        if (selectedStudent === id) setSelectedStudent('');
-      } catch (error) {
-        alert('삭제 실패: ' + error.message);
-      }
+        const related = attendance.filter(a => a.studentId === id);
+        for (const r of related) { await deleteDoc(doc(db, 'attendance', r.id)); }
+      } catch (error) { alert(error.message); }
     }
   };
 
+  // 달력 그리기
   const renderCalendar = () => {
     const year = currentDate.getFullYear();
     const month = currentDate.getMonth();
@@ -168,23 +229,46 @@ export default function App() {
     for (let d = 1; d <= daysInMonth; d++) {
       const dateStr = format(new Date(year, month, d), 'yyyy-MM-dd');
       const record = attendance.find(a => a.studentId === selectedStudent && a.date === dateStr);
+      const isHoliday = holidays.some(h => h.date === dateStr);
+      const isSelected = selectedDateForAbsence === dateStr;
       
       days.push(
-        <div key={d} className="h-20 border border-gray-100 p-1 flex flex-col items-center justify-start bg-white">
-          <span className="text-xs font-medium text-gray-600 mb-1">{d}</span>
-          {record && (
-            // 🔥 시간 부분을 누르면 handleEditTime 함수가 실행되도록 수정 (cursor-pointer 추가)
-            <div 
-              onClick={() => handleEditTime(record)}
-              className={`cursor-pointer w-full flex flex-col items-center justify-center rounded py-1 transition-colors active:bg-gray-200 ${record.lateMinutes > 0 ? 'bg-red-50' : 'bg-green-50'}`}
-            >
-              <span className={`text-sm font-bold ${record.lateMinutes > 0 ? 'text-red-600' : 'text-green-600'}`}>
-                {record.time}
-              </span>
-              {record.lateMinutes > 0 && (
-                <span className="text-[10px] text-red-500 font-semibold">+{record.lateMinutes}분 지각</span>
-              )}
+        <div 
+          key={d} 
+          onClick={() => handleDayClick(dateStr, record)}
+          className={`h-20 border border-gray-100 p-1 flex flex-col items-center justify-start relative transition-all duration-100
+            ${isHoliday ? 'bg-amber-50/70' : 'bg-white'} 
+            ${isSelected ? 'ring-2 ring-blue-500 ring-inset bg-blue-50/50' : ''}`}
+        >
+          <span className={`text-xs font-medium mb-1 ${isHoliday ? 'text-amber-700' : 'text-gray-600'}`}>{d}</span>
+          
+          {isHoliday && (
+            <div className="w-full bg-amber-500 text-white text-[11px] font-bold text-center py-1.5 rounded shadow-sm mt-1">
+              휴강
             </div>
+          )}
+
+          {!isHoliday && isSelected && !record && (
+            <div className="text-[10px] text-blue-600 font-bold bg-blue-100 px-1 py-0.5 rounded animate-pulse mt-2">
+              선택됨
+            </div>
+          )}
+
+          {!isHoliday && record && (
+            record.status === 'absent' ? (
+              <div className="w-full bg-rose-500 text-white text-[11px] font-bold text-center py-1.5 rounded shadow-sm mt-1">
+                결석
+              </div>
+            ) : (
+              <div className={`w-full flex flex-col items-center justify-center rounded py-0.5 ${record.lateMinutes > 0 ? 'bg-red-50' : 'bg-green-50'}`}>
+                <span className={`text-sm font-bold ${record.lateMinutes > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                  {record.time}
+                </span>
+                {record.lateMinutes > 0 && (
+                  <span className="text-[9px] text-red-500 font-bold">+{record.lateMinutes}분 지각</span>
+                )}
+              </div>
+            )
           )}
         </div>
       );
@@ -192,15 +276,6 @@ export default function App() {
     return days;
   };
 
-  if (loading) {
-    return (
-      <div className="w-full h-screen max-w-md mx-auto flex items-center justify-center bg-gray-50 text-gray-500 font-medium">
-        클라우드 데이터 연결 중...
-      </div>
-    );
-  }
-
-  // 오늘 날짜 문자열 (출석 여부 시각 효과용)
   const todayStr = format(new Date(), 'yyyy-MM-dd');
 
   return (
@@ -215,30 +290,33 @@ export default function App() {
 
       <main className="flex-1 overflow-y-auto pb-20">
         
+        {/* [탭 1] 출결 입력 */}
         {activeTab === 'input' && (
           <div className="p-5">
             <p className="text-sm text-gray-500 mb-4 flex items-center">
-              <CheckCircle size={16} className="mr-1 text-green-500" /> 탭하여 출석 / 한 번 더 탭하여 취소
+              <CheckCircle size={16} className="mr-1 text-green-500" /> 등원 시 카드 터치 (가나다순 정렬 완료)
             </p>
             <div className="grid grid-cols-2 gap-3">
               {students.map(student => {
-                // 🔥 오늘 해당 학생의 출결 기록이 있는지 확인
-                const isAttendedToday = attendance.some(a => a.studentId === student.id && a.date === todayStr);
-                
+                const isAttendedToday = attendance.some(a => a.studentId === student.id && a.date === todayStr && a.status !== 'absent');
+                const isAbsentToday = attendance.some(a => a.studentId === student.id && a.date === todayStr && a.status === 'absent');
+                const isTodayHoliday = holidays.some(h => h.date === todayStr);
+
                 return (
                   <button
                     key={student.id}
                     onClick={() => handleTapAttendance(student)}
-                    // 🔥 출석했으면 초록색 배경으로 변경되도록 디자인 추가
+                    disabled={isTodayHoliday}
                     className={`border-2 shadow-sm rounded-xl p-5 flex flex-col items-center justify-center transition-all duration-150
-                      ${isAttendedToday 
-                        ? 'bg-green-50 border-green-400 text-green-800' 
-                        : 'bg-white border-transparent active:border-blue-500 active:bg-blue-50 text-gray-800'
-                      }`}
+                      ${isTodayHoliday ? 'bg-gray-100 border-gray-200 text-gray-400 cursor-not-allowed' : 
+                        isAbsentToday ? 'bg-rose-50 border-rose-300 text-rose-700' :
+                        isAttendedToday ? 'bg-green-50 border-green-400 text-green-800' : 
+                        'bg-white border-transparent active:border-blue-500 text-gray-800'}`}
                   >
                     <span className="text-xl font-bold mb-1">{student.name}</span>
-                    <span className={`text-xs flex items-center ${isAttendedToday ? 'text-green-600' : 'text-gray-400'}`}>
-                      <Clock size={12} className="mr-1" /> 기준 {student.classTime}
+                    <span className="text-xs flex items-center opacity-80">
+                      <Clock size={12} className="mr-1" /> 
+                      {isTodayHoliday ? '공식 휴강일' : isAbsentToday ? '오늘 결석' : `기준 ${student.classTime}`}
                     </span>
                   </button>
                 );
@@ -247,26 +325,35 @@ export default function App() {
           </div>
         )}
 
+        {/* [탭 2] 달력 조회 */}
         {activeTab === 'calendar' && (
           <div className="p-4">
-            <div className="bg-white rounded-xl shadow-sm p-4 mb-4">
+            <div className="bg-white rounded-xl shadow-sm p-4 mb-4 flex flex-col space-y-3">
               <select 
-                className="w-full p-2 border border-gray-200 rounded-lg text-lg font-bold text-gray-800 focus:outline-none"
+                className="w-full p-2 border border-gray-200 rounded-lg text-lg font-bold text-gray-800 focus:outline-none bg-gray-50"
                 value={selectedStudent}
-                onChange={(e) => setSelectedStudent(e.target.value)}
+                onChange={(e) => { setSelectedStudent(e.target.value); setSelectedDateForAbsence(''); }}
               >
                 <option value="" disabled>학생을 선택하세요</option>
                 {students.map(s => (
-                  <option key={s.id} value={s.id}>{s.name} 학생 출결 리포트</option>
+                  <option key={s.id} value={s.id}>{s.name} 원생 출결 리포트</option>
                 ))}
               </select>
+              
+              <button 
+                onClick={handleRegisterHoliday}
+                className="w-full bg-amber-500 text-white font-bold py-2.5 rounded-lg text-sm shadow-sm active:bg-amber-600 transition-colors flex items-center justify-center space-x-1"
+              >
+                <AlertTriangle size={16} />
+                <span>{format(currentDate, 'M월')} 전체 공통 휴강 등록/취소</span>
+              </button>
             </div>
 
             <div className="bg-white rounded-xl shadow-sm overflow-hidden border border-gray-100">
               <div className="bg-blue-600 text-white text-center py-3 font-bold text-lg flex justify-between px-4 items-center">
-                <button onClick={() => setCurrentDate(new Date(currentDate.setMonth(currentDate.getMonth() - 1)))} className="px-2 font-bold">&lt;</button>
+                <button onClick={() => { setCurrentDate(new Date(currentDate.setMonth(currentDate.getMonth() - 1))); setSelectedDateForAbsence(''); }} className="px-2 font-bold">&lt;</button>
                 <span>{format(currentDate, 'yyyy년 MM월')}</span>
-                <button onClick={() => setCurrentDate(new Date(currentDate.setMonth(currentDate.getMonth() + 1)))} className="px-2 font-bold">&gt;</button>
+                <button onClick={() => { setCurrentDate(new Date(currentDate.setMonth(currentDate.getMonth() + 1))); setSelectedDateForAbsence(''); }} className="px-2 font-bold">&gt;</button>
               </div>
               <div className="grid grid-cols-7 bg-gray-50 border-b border-gray-100">
                 {['일', '월', '화', '수', '목', '금', '토'].map(day => (
@@ -279,14 +366,19 @@ export default function App() {
                 {renderCalendar()}
               </div>
             </div>
-            <p className="text-xs text-center text-gray-400 mt-3">* 달력 안의 시간을 터치하면 시간을 수정할 수 있습니다.</p>
+            <div className="text-[11px] text-gray-400 mt-3 bg-white p-3 rounded-lg shadow-sm space-y-1 border border-gray-100">
+              <p className="font-semibold text-gray-500">💡 달력 활용 가이드</p>
+              <p>• **결석 처리:** 빈 날짜 터치(선택됨) ➔ 한 번 더 터치(결석 등록) ➔ 한 번 더 터치(복구)</p>
+              <p>• **시간 수정:** 기록된 출석 시각을 터치하면 분 단위 지각 재계산 및 수정 가능</p>
+            </div>
           </div>
         )}
 
+        {/* [탭 3] 원생 관리 */}
         {activeTab === 'settings' && (
           <div className="p-5">
             <div className="bg-white p-5 rounded-xl shadow-sm mb-6">
-              <h3 className="font-bold text-gray-800 mb-4">원생 등록</h3>
+              <h3 className="font-bold text-gray-800 mb-4">신규 원생 등록</h3>
               <form onSubmit={handleAddStudent} className="space-y-3">
                 <input 
                   type="text" placeholder="학생 이름" required
@@ -307,12 +399,19 @@ export default function App() {
 
             <div className="bg-white p-5 rounded-xl shadow-sm">
               <h3 className="font-bold text-gray-800 mb-4">재원생 명단 관리 ({students.length}명)</h3>
+              <p className="text-xs text-gray-400 mb-3">* 학생 이름을 터치하면 정규 등원 기준 시각을 변경할 수 있습니다.</p>
               <ul className="divide-y divide-gray-100">
                 {students.map(student => (
                   <li key={student.id} className="py-3 flex justify-between items-center">
-                    <div>
+                    {/* 🔥 이름 및 등원시간 영역을 클릭하면 수정이 작동하도록 이벤트를 연결했습니다. */}
+                    <div 
+                      onClick={() => handleEditStudentClassTime(student)}
+                      className="cursor-pointer flex-1 py-1 hover:bg-gray-50 rounded transition-colors active:bg-gray-100"
+                    >
                       <span className="font-bold text-gray-800">{student.name}</span>
-                      <span className="text-xs text-gray-400 ml-2">수업 등원선: {student.classTime}</span>
+                      <span className="text-xs text-blue-600 font-medium bg-blue-50 px-1.5 py-0.5 rounded ml-2">
+                        기준: {student.classTime} ✏️
+                      </span>
                     </div>
                     <button 
                       onClick={() => handleDeleteStudent(student.id)}
