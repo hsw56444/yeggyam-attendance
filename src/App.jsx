@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Users, Calendar as CalendarIcon, Settings, CheckCircle, Clock, AlertTriangle } from 'lucide-react';
+import { Users, Calendar as CalendarIcon, Settings, CheckCircle, Clock, AlertTriangle, X, Save } from 'lucide-react';
 import { format, getDaysInMonth, startOfMonth, getDay } from 'date-fns';
 import { db } from './firebase';
 import { collection, onSnapshot, addDoc, deleteDoc, doc, updateDoc } from 'firebase/firestore';
@@ -17,6 +17,11 @@ export default function App() {
   const [selectedDateForAbsence, setSelectedDateForAbsence] = useState('');
   const [newStudentName, setNewStudentName] = useState('');
   const [newClassTime, setNewClassTime] = useState('15:00');
+
+  // 🔥 새로운 UI 관리 상태 추가
+  const [isHolidayEditMode, setIsHolidayEditMode] = useState(false); // 휴강 편집 모드 여부
+  const [editingStudentId, setEditingStudentId] = useState(null); // 현재 정규시간 수정 중인 학생 ID
+  const [editingClassTime, setEditingClassTime] = useState(''); // 수정 중인 시간 임시 저장
 
   // 1. 학생 목록 로드 (가나다순)
   useEffect(() => {
@@ -96,8 +101,8 @@ export default function App() {
     } catch (error) { alert(error.message); }
   };
 
-  // 등원 시간 수정 기능 (달력 탭에서 사용)
-  const handleEditTime = async (record) => {
+  // 등원 시간 수정 기능 (달력 탭에서 사용 - 드롭다운 방식으로 우회 처리하기 위해 보존)
+  const handleEditTimePrompt = async (record) => {
     const newTime = window.prompt('수정할 등원 시각을 입력하세요 (예: 15:30)', record.time);
     if (newTime === null) return;
     
@@ -120,34 +125,36 @@ export default function App() {
     } catch (error) { alert(error.message); }
   };
 
-  // 🔥 추가기능 : 재원생 명단에서 학생 정규 수업시각 수정 기능
-  const handleEditStudentClassTime = async (student) => {
-    const newTime = window.prompt(`${student.name} 학생의 변경할 정규 등원시각을 입력하세요 (예: 16:00)`, student.classTime);
-    if (newTime === null) return; // 취소 누르면 중단
-
-    const timeRegex = /^([01]?[0-9]|2[0-3]):[0-5][0-9]$/;
-    if (!timeRegex.test(newTime)) {
-      alert('시간 형식이 올바르지 않습니다. 반드시 16:00 형태로 입력해 주세요.');
-      return;
-    }
-
+  // 🔥 인라인 드롭다운으로 변경되었으므로 파이어베이스에 직접 저장하는 전용 함수
+  const handleSaveStudentClassTime = async (studentId) => {
     try {
-      // Firebase 클라우드의 학생 정규 시각 업데이트
-      await updateDoc(doc(db, 'students', student.id), {
-        classTime: newTime
+      await updateDoc(doc(db, 'students', studentId), {
+        classTime: editingClassTime
       });
-      alert(`${student.name} 학생의 기준 시각이 ${newTime}으로 변경되었습니다.`);
+      setEditingStudentId(null);
     } catch (error) {
       alert('기준 시각 수정 실패: ' + error.message);
     }
   };
 
-  // 달력 날짜 클릭 시 3단계 사이클 (선택 -> 결석 -> 복구)
+  // 🔥 기능 2 통합형 달력 칸 클릭 핸들러 (휴강 편집 모드 대응)
   const handleDayClick = async (dateStr, record) => {
-    if (holidays.some(h => h.date === dateStr)) return;
+    // [경우 A] 공통 휴강 편집 모드일 때 탭 작동 방식
+    if (isHolidayEditMode) {
+      const existingHoliday = holidays.find(h => h.date === dateStr);
+      if (existingHoliday) {
+        await deleteDoc(doc(db, 'holidays', existingHoliday.id));
+      } else {
+        await addDoc(collection(db, 'holidays'), { date: dateStr });
+      }
+      return;
+    }
+
+    // [경우 B] 일반 모드일 때 결석/수정 작동 방식
+    if (holidays.some(h => h.date === dateStr)) return; // 휴강일은 터치 무시
 
     if (record && record.status !== 'absent') {
-      handleEditTime(record);
+      handleEditTimePrompt(record);
       return;
     }
 
@@ -170,31 +177,6 @@ export default function App() {
     }
   };
 
-  // 공통 휴강 등록 기능 (토글 방식)
-  const handleRegisterHoliday = async () => {
-    const currentMonthStr = format(currentDate, 'yyyy년 MM월');
-    const dayInput = window.prompt(`${currentMonthStr}에 적용할 휴강 날짜(일)를 숫자만 입력하세요. (예: 25)\n이미 등록된 날짜를 입력하면 휴강이 취소됩니다.`);
-    if (!dayInput) return;
-
-    const dayNum = parseInt(dayInput, 10);
-    if (isNaN(dayNum) || dayNum < 1 || dayNum > 31) {
-      alert('올바른 날짜를 입력해 주세요.');
-      return;
-    }
-
-    const targetDateStr = format(new Date(currentDate.getFullYear(), currentDate.getMonth(), dayNum), 'yyyy-MM-dd');
-    const existingHoliday = holidays.find(h => h.date === targetDateStr);
-
-    if (existingHoliday) {
-      if (window.confirm(`${dayNum}일의 공통 휴강을 취소하고 정상 수업일로 복구하시겠습니까?`)) {
-        await deleteDoc(doc(db, 'holidays', existingHoliday.id));
-      }
-    } else {
-      await addDoc(collection(db, 'holidays'), { date: targetDateStr });
-      alert(`${dayNum}일이 공통 휴강일로 등록되었습니다.`);
-    }
-  };
-
   const handleAddStudent = async (e) => {
     e.preventDefault();
     if (!newStudentName) return;
@@ -214,7 +196,7 @@ export default function App() {
     }
   };
 
-  // 달력 그리기
+  // 달력 내부 렌더링
   const renderCalendar = () => {
     const year = currentDate.getFullYear();
     const month = currentDate.getMonth();
@@ -230,17 +212,18 @@ export default function App() {
       const dateStr = format(new Date(year, month, d), 'yyyy-MM-dd');
       const record = attendance.find(a => a.studentId === selectedStudent && a.date === dateStr);
       const isHoliday = holidays.some(h => h.date === dateStr);
-      const isSelected = selectedDateForAbsence === dateStr;
+      const isAbsenceSelected = selectedDateForAbsence === dateStr;
       
       days.push(
         <div 
           key={d} 
           onClick={() => handleDayClick(dateStr, record)}
-          className={`h-20 border border-gray-100 p-1 flex flex-col items-center justify-start relative transition-all duration-100
+          className={`h-20 border border-gray-100 p-1 flex flex-col items-center justify-start relative transition-all duration-100 cursor-pointer
+            ${isHolidayEditMode ? 'hover:bg-amber-100 active:bg-amber-200' : ''}
             ${isHoliday ? 'bg-amber-50/70' : 'bg-white'} 
-            ${isSelected ? 'ring-2 ring-blue-500 ring-inset bg-blue-50/50' : ''}`}
+            ${!isHolidayEditMode && isAbsenceSelected ? 'ring-2 ring-blue-500 ring-inset bg-blue-50/50' : ''}`}
         >
-          <span className={`text-xs font-medium mb-1 ${isHoliday ? 'text-amber-700' : 'text-gray-600'}`}>{d}</span>
+          <span className={`text-xs font-medium mb-1 ${isHoliday ? 'text-amber-700 font-bold' : 'text-gray-600'}`}>{d}</span>
           
           {isHoliday && (
             <div className="w-full bg-amber-500 text-white text-[11px] font-bold text-center py-1.5 rounded shadow-sm mt-1">
@@ -248,7 +231,7 @@ export default function App() {
             </div>
           )}
 
-          {!isHoliday && isSelected && !record && (
+          {!isHoliday && !isHolidayEditMode && isAbsenceSelected && !record && (
             <div className="text-[10px] text-blue-600 font-bold bg-blue-100 px-1 py-0.5 rounded animate-pulse mt-2">
               선택됨
             </div>
@@ -294,7 +277,7 @@ export default function App() {
         {activeTab === 'input' && (
           <div className="p-5">
             <p className="text-sm text-gray-500 mb-4 flex items-center">
-              <CheckCircle size={16} className="mr-1 text-green-500" /> 등원 시 카드 터치 (가나다순 정렬 완료)
+              <CheckCircle size={16} className="mr-1 text-green-500" /> 등원 시 카드 터치 (가나다순 정렬)
             </p>
             <div className="grid grid-cols-2 gap-3">
               {students.map(student => {
@@ -332,6 +315,7 @@ export default function App() {
               <select 
                 className="w-full p-2 border border-gray-200 rounded-lg text-lg font-bold text-gray-800 focus:outline-none bg-gray-50"
                 value={selectedStudent}
+                disabled={isHolidayEditMode}
                 onChange={(e) => { setSelectedStudent(e.target.value); setSelectedDateForAbsence(''); }}
               >
                 <option value="" disabled>학생을 선택하세요</option>
@@ -340,19 +324,27 @@ export default function App() {
                 ))}
               </select>
               
+              {/* 🔥 기능 2: 공통 휴강 등록 모드 제어 버튼 */}
               <button 
-                onClick={handleRegisterHoliday}
-                className="w-full bg-amber-500 text-white font-bold py-2.5 rounded-lg text-sm shadow-sm active:bg-amber-600 transition-colors flex items-center justify-center space-x-1"
+                onClick={() => { setIsHolidayEditMode(!isHolidayEditMode); setSelectedDateForAbsence(''); }}
+                className={`w-full font-bold py-2.5 rounded-lg text-sm shadow-sm transition-all flex items-center justify-center space-x-1
+                  ${isHolidayEditMode 
+                    ? 'bg-amber-600 text-white ring-4 ring-amber-200 animate-pulse' 
+                    : 'bg-amber-500 text-white active:bg-amber-600'}`}
               >
                 <AlertTriangle size={16} />
-                <span>{format(currentDate, 'M월')} 전체 공통 휴강 등록/취소</span>
+                <span>
+                  {isHolidayEditMode ? '⚠️ 달력 날짜 터치 중... (종료하려면 클릭)' : `${format(currentDate, 'M월')} 전체 공통 휴강 터치로 설정`}
+                </span>
               </button>
             </div>
 
-            <div className="bg-white rounded-xl shadow-sm overflow-hidden border border-gray-100">
-              <div className="bg-blue-600 text-white text-center py-3 font-bold text-lg flex justify-between px-4 items-center">
+            <div className={`bg-white rounded-xl shadow-sm overflow-hidden border transition-all
+              ${isHolidayEditMode ? 'border-amber-400 ring-2 ring-amber-400' : 'border-gray-100'}`}>
+              <div className={`text-white text-center py-3 font-bold text-lg flex justify-between px-4 items-center transition-colors
+                ${isHolidayEditMode ? 'bg-amber-600' : 'bg-blue-600'}`}>
                 <button onClick={() => { setCurrentDate(new Date(currentDate.setMonth(currentDate.getMonth() - 1))); setSelectedDateForAbsence(''); }} className="px-2 font-bold">&lt;</button>
-                <span>{format(currentDate, 'yyyy년 MM월')}</span>
+                <span>{format(currentDate, 'yyyy년 MM월')} {isHolidayEditMode && ' [휴강 편집 모드]'}</span>
                 <button onClick={() => { setCurrentDate(new Date(currentDate.setMonth(currentDate.getMonth() + 1))); setSelectedDateForAbsence(''); }} className="px-2 font-bold">&gt;</button>
               </div>
               <div className="grid grid-cols-7 bg-gray-50 border-b border-gray-100">
@@ -366,10 +358,18 @@ export default function App() {
                 {renderCalendar()}
               </div>
             </div>
-            <div className="text-[11px] text-gray-400 mt-3 bg-white p-3 rounded-lg shadow-sm space-y-1 border border-gray-100">
-              <p className="font-semibold text-gray-500">💡 달력 활용 가이드</p>
-              <p>• **결석 처리:** 빈 날짜 터치(선택됨) ➔ 한 번 더 터치(결석 등록) ➔ 한 번 더 터치(복구)</p>
-              <p>• **시간 수정:** 기록된 출석 시각을 터치하면 분 단위 지각 재계산 및 수정 가능</p>
+            
+            {/* 하단 설명 동적 가이드 */}
+            <div className="text-[11px] text-gray-400 mt-3 bg-white p-3 rounded-lg shadow-sm border border-gray-100">
+              {isHolidayEditMode ? (
+                <p className="text-amber-700 font-semibold animate-pulse">● 현재 휴강 편집 모드 활성화 상태입니다. 달력의 날짜를 누르면 휴강이 ON/OFF 됩니다.</p>
+              ) : (
+                <div className="space-y-1">
+                  <p className="font-semibold text-gray-500">💡 달력 활용 가이드</p>
+                  <p>• **결석 처리:** 빈 날짜 터치(선택됨) ➔ 한 번 더 터치(결석 등록) ➔ 한 번 더 터치(복구)</p>
+                  <p>• **시간 수정:** 기록된 출석 시각을 터치하면 수동 시간 수정창이 열립니다.</p>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -399,20 +399,45 @@ export default function App() {
 
             <div className="bg-white p-5 rounded-xl shadow-sm">
               <h3 className="font-bold text-gray-800 mb-4">재원생 명단 관리 ({students.length}명)</h3>
-              <p className="text-xs text-gray-400 mb-3">* 학생 이름을 터치하면 정규 등원 기준 시각을 변경할 수 있습니다.</p>
+              <p className="text-xs text-gray-400 mb-3">* 학생 이름을 터치하면 기준 등원시각을 간편하게 수정할 수 있습니다.</p>
               <ul className="divide-y divide-gray-100">
                 {students.map(student => (
                   <li key={student.id} className="py-3 flex justify-between items-center">
-                    {/* 🔥 이름 및 등원시간 영역을 클릭하면 수정이 작동하도록 이벤트를 연결했습니다. */}
-                    <div 
-                      onClick={() => handleEditStudentClassTime(student)}
-                      className="cursor-pointer flex-1 py-1 hover:bg-gray-50 rounded transition-colors active:bg-gray-100"
-                    >
-                      <span className="font-bold text-gray-800">{student.name}</span>
-                      <span className="text-xs text-blue-600 font-medium bg-blue-50 px-1.5 py-0.5 rounded ml-2">
-                        기준: {student.classTime} ✏️
-                      </span>
-                    </div>
+                    
+                    {/* 🔥 기능 1: 드롭다운 인라인 셀렉터 전환 구조 */}
+                    {editingStudentId === student.id ? (
+                      <div className="flex items-center space-x-2 flex-1">
+                        <span className="font-bold text-gray-800 whitespace-nowrap">{student.name}</span>
+                        <input 
+                          type="time" 
+                          className="p-1 border border-blue-400 rounded text-sm bg-white focus:outline-none"
+                          value={editingClassTime}
+                          onChange={(e) => setEditingClassTime(e.target.value)}
+                        />
+                        <button 
+                          onClick={() => handleSaveStudentClassTime(student.id)}
+                          className="bg-green-500 text-white p-1 rounded hover:bg-green-600"
+                        ><Save size={16} /></button>
+                        <button 
+                          onClick={() => setEditingStudentId(null)}
+                          className="bg-gray-400 text-white p-1 rounded hover:bg-gray-500"
+                        ><X size={16} /></button>
+                      </div>
+                    ) : (
+                      <div 
+                        onClick={() => { 
+                          setEditingStudentId(student.id); 
+                          setEditingClassTime(student.classTime); 
+                        }}
+                        className="cursor-pointer flex-1 py-1 hover:bg-gray-50 rounded transition-colors active:bg-gray-100"
+                      >
+                        <span className="font-bold text-gray-800">{student.name}</span>
+                        <span className="text-xs text-blue-600 font-semibold bg-blue-50 px-2 py-0.5 rounded ml-2 border border-blue-100">
+                          {student.classTime} ▾
+                        </span>
+                      </div>
+                    )}
+
                     <button 
                       onClick={() => handleDeleteStudent(student.id)}
                       className="text-xs bg-red-50 text-red-500 px-3 py-1 rounded-md font-semibold active:bg-red-100"
